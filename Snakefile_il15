@@ -1,0 +1,105 @@
+from itertools import chain, combinations
+from os.path import join
+import glob
+import re
+
+RAWDATA_DIR = '/vol_b/rawdata/jws67wot24/UnalignedBatch34/Project_RCAG_L3_H1904P_Gingrich'
+
+SAMPLE_NAMES = ['Canine__cryo_UYW9_S40_L003_R1_001.fastq.gz', 'Canine_cryo_20180916_S38_L003_R1_001.fastq.gz', 'Canine_cryo_XBG7_S41_L003_R1_001.fastq.gz', 'Canine_cryo_XDC7_S39_L003_R1_001.fastq.gz', 'Canine_flash_20180916_S18_L003_R1_001.fastq.gz', 'Canine_flash_UYW9_S20_L003_R1_001.fastq.gz', 'Canine_flash_XBG7_S21_L003_R1_001.fastq.gz', 'Canine_flash_XDC7_S19_L003_R1_001.fastq.gz', 'Canine_frozen_20180916_S30_L003_R1_001.fastq.gz', 'Canine_frozen_UYW9_S32_L003_R1_001.fastq.gz', 'Canine_frozen_XBG7_S33_L003_R1_001.fastq.gz', 'Canine_frozen_XDC7_S31_L003_R1_001.fastq.gz', 'Human_cryo_20180803_S34_L003_R1_001.fastq.gz', 'Human_cryo_20190410_S35_L003_R1_001.fastq.gz', 'Human_cryo_20190426_S36_L003_R1_001.fastq.gz', 'Human_cryo_20190524_S37_L003_R1_001.fastq.gz', 'Human_flash_20180803_S14_L003_R1_001.fastq.gz', 'Human_flash_20190410_S15_L003_R1_001.fastq.gz', 'Human_flash_20190426_S16_L003_R1_001.fastq.gz', 'Human_flash_20190524_S17_L003_R1_001.fastq.gz', 'Human_frozen_20180803_S26_L003_R1_001.fastq.gz', 'Human_frozen_20190410_S27_L003_R1_001.fastq.gz', 'Human_frozen_20190426_S28_L003_R1_001.fastq.gz', 'Human_frozen_20190524_S29_L003_R1_001.fastq.gz', 'Mouse_flash_IL2IKA_S23_L003_R1_001.fastq.gz', 'Mouse_flash_IL2IKB_S24_L003_R1_001.fastq.gz', 'Mouse_flash_IL2IKC_S25_L003_R1_001.fastq.gz', 'Mouse_flash_T252_1_S22_L003_R1_001.fastq.gz']
+
+
+rule all:
+    input: 
+        expand('outputs/quant_cf_nonribo/{sample}_quant/quant.sf', sample = SAMPLE_NAMES),
+	    expand('outputs/quant_hs_nonribo/{sample}_quant/quant.sf', sample = SAMPLE_NAMES),
+		expand('outputs/ribo/{sample}-nonribo.qc.fq.gz', sample = SAMPLE_NAMES)
+
+rule cat_fastq:
+    output: 'inputs/cat/{sample}.fq.gz'
+    params: indir = RAWDATA_DIR
+    shell:'''
+    cat {params.indir}/{wildcards.sample}_S*_L00*_R1_001.fastq.gz > {output} 
+    '''
+
+rule first_12_qc:
+    output: 'outputs/quality/{sample}.trim.fq.gz'
+    input: 'inputs/cat/{sample}.fq.gz'
+    conda: 'env.yml'
+    shell:''' 
+    trimmomatic SE {input} {output} LEADING:12
+    '''
+    
+rule bbduk_qc:
+    output: 'outputs/quality/{sample}.trimbb.fq.gz'
+    input:
+        fq = 'outputs/quality/{sample}.trim.fq.gz',
+        polyA = 'inputs/polyA.fa.gz',
+        truseqr = 'inputs/truseq_rna.fa.gz',
+        truseq = 'inputs/truseq.fa.gz'
+    conda: 'env.yml'
+    shell:'''
+    bbduk.sh in={input.fq} out={output} ref={input.polyA},{input.truseq},{input.truseqr} k=13 ktrim=r useshortkmers=t mink=5 qtrim=r trimq=10 minlength=20
+    '''
+
+rule bbduk_find_ribo:
+    output:
+        ribo='outputs/ribo/{sample}-ribo.qc.fq.gz',
+        nonribo='outputs/ribo/{sample}-nonribo.qc.fq.gz'
+    input: 
+        reads='outputs/quality/{sample}.trimbb.fq.gz',
+        ribo='inputs/humanribo.fas'
+    conda: 'env.yml'
+    shell:'''
+    bbduk.sh -Xmx4g in={input.reads} outm={output.ribo} outu={output.nonribo} k=31 ref={input.ribo}
+    '''
+
+rule download_cf_transcriptome:
+    output: 'inputs/transcriptomes/GCF_000002285.3_CanFam3.1_rna.fna.gz'
+    shell:'''
+    curl -L ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/002/285/GCF_000002285.3_CanFam3.1/GCF_000002285.3_CanFam3.1_rna.fna.gz -o {output}
+    '''
+
+rule download_hs_transcriptome:
+    output: 'inputs/transcriptomes/GCF_000001405.39_GRCh38.p13_rna.fna.gz'
+    shell:'''
+    curl -L ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.39_GRCh38.p13/GCF_000001405.39_GRCh38.p13_rna.fna.gz -o {output}
+    '''
+
+rule index_cf:
+    output: directory('inputs/transcriptomes/cf_index')
+    input: 'inputs/transcriptomes/GCF_000002285.3_CanFam3.1_rna.fna.gz'
+    conda: 'env.yml'
+    shell:'''
+    salmon index -t {input} -i {output}
+    '''
+
+rule index_hs:
+    output: directory('inputs/transcriptomes/hs_index')
+    input: 'inputs/transcriptomes/GCF_000001405.39_GRCh38.p13_rna.fna.gz'
+    conda: 'env.yml'
+    shell:'''
+    salmon index -t {input} -i {output}
+    '''
+
+rule salmon_cf:
+    output: 'outputs/quant_cf_nonribo/{sample}_quant/quant.sf',
+    input:
+        fq = 'outputs/ribo/{sample}-nonribo.qc.fq.gz',
+        indx = 'inputs/transcriptomes/cf_index'
+    conda: 'env.yml'
+    params: outdir = "outputs/quant_cf_nonribo/{sample}_quant/"
+    shell:'''
+    salmon quant -i {input.indx} -l A -r {input.fq} --writeUnmappedNames -o {params.outdir}
+    '''
+
+rule salmon_hs:
+    output: 'outputs/quant_hs_nonribo/{sample}_quant/quant.sf',
+    input:
+        fq = 'outputs/ribo/{sample}-nonribo.qc.fq.gz',
+        indx = 'inputs/transcriptomes/hs_index'
+    conda: 'env.yml'
+    params: outdir = "outputs/quant_hs_nonribo/{sample}_quant/"
+    shell:'''
+    salmon quant -i {input.indx} -l A -r {input.fq} --writeUnmappedNames -o {params.outdir}
+    '''
+	
